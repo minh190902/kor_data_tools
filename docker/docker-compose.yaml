@@ -1,0 +1,50 @@
+services:
+  # FastAPI Service
+  fastapi:
+    container_name: ai-data-processing
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: uvicorn api.api:app --host 0.0.0.0 --port 8888 --workers 2
+    ports:
+      - "8888:8888"
+    volumes:
+      - ../output:/src/output  # Only mount output dir
+    env_file:
+      - ../.env
+    restart: unless-stopped
+    networks:
+      - kor-data-processing
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONIOENCODING=utf-8
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # Gradio Service (Optimized)  
+  app:
+    container_name: gradio-app
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gradio
+    command: gradio ui/app_download.py
+    ports:
+      - "7866:7866"
+    env_file:
+      - ../.env
+    depends_on:
+      - fastapi
+    restart: unless-stopped
+    networks:
+      - kor-data-processing
+    environment:
+      - API_BASE_URL=http://ai-data-processing:8888
+      - GRADIO_HOST=0.0.0.0
+      - GRADIO_PORT=7866
+
+networks:
+  kor-data-processing:
+    driver: bridge

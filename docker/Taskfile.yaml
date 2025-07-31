@@ -1,0 +1,21 @@
+version: '3.8'
+
+tasks:
+  clear: # WARNING
+    desc: Stop and remove all containers, networks, and volumes
+    cmds:
+      - docker stop $(docker ps -q) && docker rm $(docker ps -a -q)
+      - docker rmi -f $(docker images -q)
+      - docker volume prune -f
+
+  reset:
+    desc: Stop and remove all in your container
+    cmds:
+      # - cp example.env .env
+      - docker compose down
+
+  build: 
+    desc: Build and start Docker containers
+    cmds: 
+      # - cp example.env .env
+      - docker compose up --build -d 
