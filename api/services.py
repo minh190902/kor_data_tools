@@ -9,8 +9,10 @@ import time
 import pandas as pd
 
 from processors.topik_processor import TOPIKDataProcessor
-from config import logger
 from .schemas import ProcessingStatus, FileInfo
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class TOPIKProcessingService:
@@ -23,7 +25,6 @@ class TOPIKProcessingService:
     async def initialize_processor(self, gemini_api_key: str) -> bool:
         """Initialize the TOPIK processor"""
         try:
-            logger.info("🔧 Creating TOPIKDataProcessor instance...")
             self.processor = TOPIKDataProcessor(
                 gemini_api_key=gemini_api_key,
                 db_config=None,

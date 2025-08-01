@@ -30,7 +30,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.gradio
-    command: gradio ui/app_download.py
+    command: gradio ui/app.py
     ports:
       - "7866:7866"
     env_file:

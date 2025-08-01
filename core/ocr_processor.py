@@ -1,29 +1,54 @@
 from PIL import Image
 from pathlib import Path
-from typing import List
-from paddleocr import PaddleOCR
+from typing import List, Optional
+import threading
 
-from config import logger, OCRResult
+from config import logger, OCR_LOGGER, OCRResult
 from config.ocr_config import DEFAULT_OCR_CONFIGS
 
 class TOPIKOCRProcessor:
-    """Enhanced OCR processor with robust error handling for PaddleOCR v3.1+"""
+    """Thread-safe OCR processor with model caching and memory management for PaddleOCR v3.1+"""
+    
+    _instance = None
+    _lock = threading.Lock()
+    _ocr_model = None
+    _initialized = False
+    _processing_lock = threading.RLock()  # Reentrant lock for processing
+    
+    def __new__(cls):
+        """Singleton pattern to reuse OCR model across instances"""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super(TOPIKOCRProcessor, cls).__new__(cls)
+        return cls._instance
     
     def __init__(self):
-        """Initialize PaddleOCR with multiple fallback configurations"""
-        self.ocr = None
-        self._initialize_ocr()
-        logger.info("✅ PaddleOCR processor ready")
+        """Initialize PaddleOCR with model caching - only once per application lifecycle"""
+        if not self._initialized:
+            with self._lock:
+                if not self._initialized:
+                    # OCR_LOGGER.info("🔄 Initializing PaddleOCR processor (singleton)...")
+                    self._initialize_ocr()
+                    self._initialized = True
+                    # OCR_LOGGER.info("✅ PaddleOCR processor ready (cached for reuse)")
+                    import sys
+                    sys.stdout.flush()  # Force flush for Docker
+                else:
+                    OCR_LOGGER.info("♻️ Reusing existing PaddleOCR instance")
+        else:
+            OCR_LOGGER.info("♻️ Reusing existing PaddleOCR instance")
+    
+    @property
+    def ocr(self):
+        """Thread-safe access to OCR model"""
+        return self._ocr_model
     
     def _initialize_ocr(self):
         """Initialize PaddleOCR with robust configuration and dependency checking"""
         try:
             # Check for required dependencies first
             missing_deps = []
-            try:
-                import setuptools
-            except ImportError:
-                missing_deps.append("setuptools")
             
             try:
                 from paddleocr import PaddleOCR
@@ -45,7 +70,7 @@ class TOPIKOCRProcessor:
                     logger.info(f"Trying OCR configuration {i+1}/{len(configs)}")
                     logger.debug(f"Config: {config}")
                     
-                    self.ocr = PaddleOCR(**config)
+                    self._ocr_model = PaddleOCR(**config)
                     logger.info(f"✅ PaddleOCR initialized successfully with config {i+1}")
                     return
                     
@@ -115,113 +140,129 @@ class TOPIKOCRProcessor:
             return False
     
     def extract_text(self, image_path: str) -> List[OCRResult]:
-        """Enhanced text extraction with multiple fallback methods"""
+        """Thread-safe text extraction with memory management to prevent segfaults"""
         temp_path = None
         
-        try:
-            if not self.ocr:
-                logger.error("OCR not initialized")
-                return []
-            
-            # Validate image
-            if not self._validate_image(image_path):
-                return []
-            
-            # Normalize path
-            safe_path = self._normalize_path(image_path)
-            temp_path = safe_path if safe_path != image_path else None
-            
-            logger.info(f"Starting OCR for: {Path(image_path).name}")
-            
-            # Use predict method (recommended for PaddleOCR v3.1+)
+        # Use processing lock to prevent concurrent OCR calls that cause segfaults
+        with self._processing_lock:
             try:
-                logger.debug("Using predict method for OCR")
-                results = self.ocr.predict(safe_path)
-                
-                if not results or len(results) == 0:
-                    logger.warning(f"No OCR results for {image_path}")
+                if not self.ocr:
+                    OCR_LOGGER.error("OCR not initialized")
                     return []
                 
-                logger.info("✅ OCR successful using predict method")
+                # Validate image
+                if not self._validate_image(image_path):
+                    return []
                 
-            except Exception as e:
-                logger.error(f"OCR predict method failed: {e}")
-                return []
-            
-            # Process results - handle PaddleOCR v3.1+ OCRResult format
-            ocr_results = []
-            ocr_result = results[0]  # First page result (OCRResult object)
-            
-            # Extract data from OCRResult object (it's dict-like)
-            if 'rec_texts' in ocr_result and 'rec_scores' in ocr_result:
-                texts = ocr_result['rec_texts']
-                scores = ocr_result['rec_scores']
+                # Normalize path
+                safe_path = self._normalize_path(image_path)
+                temp_path = safe_path if safe_path != image_path else None
                 
-                # Get boxes if available
-                if 'rec_polys' in ocr_result:
-                    boxes = ocr_result['rec_polys']
-                elif 'dt_polys' in ocr_result:
-                    boxes = ocr_result['dt_polys']
-                else:
-                    boxes = []
+                image_name = Path(image_path).name
                 
-                logger.info(f"Found {len(texts)} text blocks from OCR")
-                
-                # Process each detected text
-                for i, (text, score) in enumerate(zip(texts, scores)):
-                    try:
-                        # Clean and validate text
-                        text = str(text).strip()
-                        if not text or len(text) < 1:
-                            continue
-                        
-                        # Get corresponding box
-                        if i < len(boxes) and boxes[i] is not None:
-                            box = boxes[i]
-                            # Convert to list if it's array-like (numpy array or similar)
-                            if hasattr(box, 'tolist') and callable(getattr(box, 'tolist')):
-                                box = box.tolist()
-                            elif not isinstance(box, list):
-                                # Try to convert to list if it's array-like
-                                try:
-                                    box = list(box)
-                                except (TypeError, ValueError):
-                                    box = [[0, 0], [100, 0], [100, 20], [0, 20]]
-                        else:
-                            # Default box if not available
-                            box = [[0, 0], [100, 0], [100, 20], [0, 20]]
-                        
-                        ocr_results.append(OCRResult(
-                            box=box,
-                            text=text,
-                            confidence=float(score) if score else 1.0
-                        ))
-                        
-                    except Exception as item_error:
-                        logger.warning(f"Error processing OCR item {i}: {item_error}")
-                        continue
-            
-            else:
-                logger.error(f"OCRResult missing expected keys. Available keys: {list(ocr_result.keys()) if hasattr(ocr_result, 'keys') else 'N/A'}")
-                return []
-            
-            logger.info(f"Successfully extracted {len(ocr_results)} text blocks")
-            return ocr_results
-            
-        except Exception as e:
-            logger.error(f"OCR extraction failed for {image_path}: {e}")
-            return []
-            
-        finally:
-            # Cleanup temporary files
-            if temp_path and temp_path != image_path:
+                # Use predict method with error handling for segfaults
                 try:
-                    temp_file = Path(temp_path)
-                    if temp_file.exists():
-                        temp_file.unlink()
-                        # Remove temp directory if empty
-                        temp_dir = temp_file.parent
-                        if temp_dir.name.startswith('tmp') and not any(temp_dir.iterdir()):
-                            temp_dir.rmdir()
-                except Exception as cleanup_error:
-                    logger.debug(f"Cleanup warning: {cleanup_error}")
+                    # Force garbage collection before OCR to free memory
+                    import gc
+                    gc.collect()
+                    
+                    results = self.ocr.predict(safe_path)
+                    
+                    if not results or len(results) == 0:
+                        OCR_LOGGER.warning(f"❌ No OCR results for {image_name}")
+                        return []
+                                        
+                except Exception as e:
+                    OCR_LOGGER.error(f"❌ OCR predict failed for {image_name}: {e}")
+                    return []
+                
+                # Process results - handle PaddleOCR v3.1+ OCRResult format
+                ocr_results = []
+                ocr_result = results[0]  # First page result (OCRResult object)
+                
+                # Extract data from OCRResult object (it's dict-like)
+                if 'rec_texts' in ocr_result and 'rec_scores' in ocr_result:
+                    texts = ocr_result['rec_texts']
+                    scores = ocr_result['rec_scores']
+                    
+                    # Get boxes if available
+                    if 'rec_polys' in ocr_result:
+                        boxes = ocr_result['rec_polys']
+                    elif 'dt_polys' in ocr_result:
+                        boxes = ocr_result['dt_polys']
+                    else:
+                        boxes = []
+                    
+                    OCR_LOGGER.info(f"📝 Found {len(texts)} text blocks from {image_name}")
+                    
+                    # Process each detected text
+                    for i, (text, score) in enumerate(zip(texts, scores)):
+                        try:
+                            # Clean and validate text
+                            text = str(text).strip()
+                            if not text or len(text) < 1:
+                                continue
+                            
+                            # Get corresponding box
+                            if i < len(boxes) and boxes[i] is not None:
+                                box = boxes[i]
+                                # Convert to list if it's array-like (numpy array or similar)
+                                if hasattr(box, 'tolist') and callable(getattr(box, 'tolist')):
+                                    box = box.tolist()
+                                elif not isinstance(box, list):
+                                    # Try to convert to list if it's array-like
+                                    try:
+                                        box = list(box)
+                                    except (TypeError, ValueError):
+                                        box = [[0, 0], [100, 0], [100, 20], [0, 20]]
+                            else:
+                                # Default box if not available
+                                box = [[0, 0], [100, 0], [100, 20], [0, 20]]
+                            
+                            ocr_results.append(OCRResult(
+                                box=box,
+                                text=text,
+                                confidence=float(score) if score else 1.0
+                            ))
+                            
+                        except Exception as item_error:
+                            OCR_LOGGER.warning(f"Error processing OCR item {i}: {item_error}")
+                            continue
+                
+                else:
+                    OCR_LOGGER.error(f"OCRResult missing expected keys. Available keys: {list(ocr_result.keys()) if hasattr(ocr_result, 'keys') else 'N/A'}")
+                    return []
+                
+                OCR_LOGGER.info(f"✅ Successfully extracted {len(ocr_results)} text blocks from {image_name}")
+                return ocr_results
+            
+            except Exception as e:
+                logger.error(f"OCR extraction failed for {image_path}: {e}")
+                return []
+                
+            finally:
+                # Cleanup temporary files - ONLY delete temp files, never original images
+                if temp_path and temp_path != image_path:
+                    try:
+                        temp_file = Path(temp_path)
+                        original_file = Path(image_path)
+                        
+                        # Extra safety check: only delete if it's actually a temp file
+                        if (temp_file.exists() and 
+                            temp_file != original_file and 
+                            'temp_ocr_' in temp_file.name and
+                            temp_file.parent.name.startswith('tmp')):
+                            
+                            logger.info(f"Cleaning up temp file: {temp_file}")
+                            temp_file.unlink()
+                            
+                            # Remove temp directory if empty
+                            temp_dir = temp_file.parent
+                            if temp_dir.name.startswith('tmp') and not any(temp_dir.iterdir()):
+                                temp_dir.rmdir()
+                                logger.info(f"Cleaned up temp directory: {temp_dir}")
+                        else:
+                            logger.warning(f"Skipped cleanup - not a temp file: {temp_file}")
+                            
+                    except Exception as cleanup_error:
+                        logger.debug(f"Cleanup warning: {cleanup_error}")

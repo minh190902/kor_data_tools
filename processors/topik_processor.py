@@ -5,7 +5,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from typing import List, Dict, Any, Optional
-from config import logger, TOPIKQuestion, TOPIKQuestionPydantic, TOPIKBatchResult
+from config import logger, TOPIK_PROCESSOR_LOGGER, TOPIKQuestion, TOPIKQuestionPydantic, TOPIKBatchResult
 from core import TOPIKOCRProcessor, TOPIKStructurer
 
 class TOPIKDataProcessor:
@@ -45,40 +45,59 @@ class TOPIKDataProcessor:
                                      source_info: str = "TOPIK") -> TOPIKBatchResult:
         """
         🚀 OPTIMIZED WORKFLOW: OCR tất cả ảnh trước → PydanticAI 1 lần duy nhất
-        Tối ưu cho cross-image questions và giảm API calls
+        Tối ưu cho cross-image questions và giảm API calls với Docker logging
         """
         try:
-            logger.info(f"🔥 Starting optimized batch processing for {len(image_paths)} images")
-            logger.info(f"📊 Processing method: {self.stats['processing_method']}")
+            TOPIK_PROCESSOR_LOGGER.info(f"🔥 Starting optimized batch processing for {len(image_paths)} images")
+            TOPIK_PROCESSOR_LOGGER.info(f"📊 Processing method: {self.stats['processing_method']}")
             
-            # STEP 1: OCR tất cả ảnh song song
-            logger.info("📄 Step 1: OCR all images in parallel...")
-            semaphore = asyncio.Semaphore(self.max_workers)
+            # STEP 1: OCR tất cả ảnh SEQUENTIAL để tránh segmentation fault
+            TOPIK_PROCESSOR_LOGGER.info("📄 Step 1: OCR all images sequentially (safer for memory)...")
+            import sys
+            sys.stdout.flush()  # Force flush for Docker
             
-            async def ocr_single_image(image_path: str) -> tuple[str, List]:
-                async with semaphore:
-                    # Create dedicated OCR processor để tránh thread conflicts
-                    thread_ocr = TOPIKOCRProcessor()
-                    results = await asyncio.to_thread(thread_ocr.extract_text, image_path)
-                    return image_path, results
-            
-            # OCR song song tất cả ảnh
-            ocr_tasks = [ocr_single_image(path) for path in image_paths]
-            all_ocr_data = await asyncio.gather(*ocr_tasks, return_exceptions=True)
-            
-            # Filter out failed OCR và exceptions
+            # Process images one by one to prevent PaddleOCR memory conflicts
             valid_ocr_data = []
-            for result in all_ocr_data:
-                if isinstance(result, Exception):
-                    logger.error(f"OCR task failed: {result}")
-                    self.stats['errors'] += 1
-                elif isinstance(result, tuple) and result[1]:  # (path, ocr_results)
-                    valid_ocr_data.append(result)
+            successful_count = 0
             
-            logger.info(f"📝 OCR completed: {len(valid_ocr_data)}/{len(image_paths)} images successful")
+            for i, image_path in enumerate(image_paths):
+                try:
+                    image_name = Path(image_path).name
+                    TOPIK_PROCESSOR_LOGGER.info(f"🔍 Processing image {i+1}/{len(image_paths)}: {image_name}")
+                    sys.stdout.flush()
+                    
+                    # Force garbage collection before each OCR to free memory
+                    import gc
+                    gc.collect()
+                    
+                    # Use single OCR instance to prevent conflicts
+                    results = await asyncio.to_thread(self.ocr_processor.extract_text, image_path)
+                    
+                    if results and len(results) > 0:
+                        valid_ocr_data.append((image_path, results))
+                        successful_count += 1
+                    else:
+                        TOPIK_PROCESSOR_LOGGER.warning(f"⚠️ No OCR results for {image_name}")
+                        self.stats['errors'] += 1
+                    
+                    sys.stdout.flush()
+                    
+                    # Small delay to prevent memory pressure
+                    await asyncio.sleep(0.1)
+                    
+                except Exception as e:
+                    TOPIK_PROCESSOR_LOGGER.error(f"❌ OCR failed for {Path(image_path).name}: {e}")
+                    self.stats['errors'] += 1
+                    sys.stdout.flush()
+                    
+                    # Continue processing other images even if one fails
+                    continue
+            
+            TOPIK_PROCESSOR_LOGGER.info(f"📝 OCR completed: {successful_count}/{len(image_paths)} images successful")
+            sys.stdout.flush()  # Force flush for Docker
             
             if not valid_ocr_data:
-                logger.warning("❌ No valid OCR data to process")
+                TOPIK_PROCESSOR_LOGGER.warning("❌ No valid OCR data to process")
                 return TOPIKBatchResult(
                     questions=[], 
                     total_questions=0, 
@@ -87,11 +106,13 @@ class TOPIKDataProcessor:
                 )
             
             # STEP 2: Sắp xếp theo tên file để đảm bảo thứ tự đúng
-            logger.info("🔄 Step 2: Sorting OCR results by filename...")
+            TOPIK_PROCESSOR_LOGGER.info("🔄 Step 2: Sorting OCR results by filename...")
             valid_ocr_data.sort(key=lambda x: Path(x[0]).name)
+            sys.stdout.flush()  # Force flush for Docker
             
             # STEP 3: Gọi PydanticAI
-            logger.info("🤖 Step 3: Single PydanticAI call for all data...")
+            TOPIK_PROCESSOR_LOGGER.info("🤖 Step 3: Single PydanticAI call for all data...")
+            sys.stdout.flush()  # Force flush for Docker
             structured_result = await self.pydantic_structurer.structure_batch_ocr(
                 valid_ocr_data, source_info
             )
@@ -100,7 +121,8 @@ class TOPIKDataProcessor:
             self.stats['processed_images'] = len(valid_ocr_data)
             self.stats['extracted_questions'] = structured_result.total_questions
             
-            logger.info(f"✅ Optimized processing completed: {structured_result.total_questions} questions extracted")
+            TOPIK_PROCESSOR_LOGGER.info(f"✅ Optimized processing completed: {structured_result.total_questions} questions extracted")
+            sys.stdout.flush()  # Force flush for Docker
             return structured_result
             
         except Exception as e:
@@ -193,13 +215,18 @@ class TOPIKDataProcessor:
                 success = await self.db_manager.save_questions(all_questions)
                 if success:
                     self.stats['saved_questions'] = len(all_questions)
+                    logger.info(f"✅ Saved {len(all_questions)} questions to database")
+                else:
+                    logger.warning("❌ Database save failed")
             
             self.stats['end_time'] = datetime.now()
-            self._print_stats()
             
             # Export to CSV
             output_dir = directory or str(Path(__file__).parent.parent / 'output')
             await self._export_to_csv(all_questions, output_dir)
+            
+            # Print traditional stats
+            self._print_stats()
             
             return True
             

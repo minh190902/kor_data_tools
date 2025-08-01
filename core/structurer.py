@@ -1,27 +1,63 @@
 import asyncio
 import json
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+import threading
 
 # PydanticAI imports - install with: pip install pydantic-ai
 from pydantic_ai import Agent
 from pydantic_ai.models.gemini import GeminiModel
 from pydantic_ai.providers.google_gla import GoogleGLAProvider
 
-from config import logger, OCRResult, TOPIKBatchResult, TOPIKQuestionPydantic
+from config import logger, STRUCTURER_LOGGER, OCRResult, TOPIKBatchResult, TOPIKQuestionPydantic
 
 
 class TOPIKStructurer:
-    """Enhanced structurer using PydanticAI for better output validation and cross-image processing"""
+    """Enhanced structurer using PydanticAI with model caching and singleton pattern"""
+    
+    _instance = None
+    _lock = threading.Lock()
+    _model = None
+    _agent = None
+    _initialized = False
+    _current_api_key = None
+    
+    def __new__(cls, api_key: str):
+        """Singleton pattern with API key validation"""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super(TOPIKStructurer, cls).__new__(cls)
+        return cls._instance
     
     def __init__(self, api_key: str):
-        """Initialize PydanticAI agent"""
-        self.model = GeminiModel('gemini-2.5-flash', provider=GoogleGLAProvider(api_key=api_key))
-        
-        self.agent = Agent(
-            model=self.model,
-            output_type=TOPIKBatchResult,
-            system_prompt="""
+        """Initialize PydanticAI agent with model caching"""
+        if not self._initialized or self._current_api_key != api_key:
+            with self._lock:
+                if not self._initialized or self._current_api_key != api_key:
+                    STRUCTURER_LOGGER.info("🔄 Initializing PydanticAI structurer (cached model)...")
+                    self._initialize_agent(api_key)
+                    self._initialized = True
+                    self._current_api_key = api_key
+                    STRUCTURER_LOGGER.info("✅ PydanticAI structurer ready (cached for reuse)")
+                    import sys
+                    sys.stdout.flush()  # Force flush for Docker
+                else:
+                    STRUCTURER_LOGGER.info("♻️ Reusing existing PydanticAI agent")
+        else:
+            STRUCTURER_LOGGER.info("♻️ Reusing existing PydanticAI agent")
+    
+    def _initialize_agent(self, api_key: str):
+        """Initialize the PydanticAI agent with Gemini model"""
+        try:
+            logger.info("🤖 Creating Gemini model connection...")
+            self._model = GeminiModel('gemini-2.5-flash', provider=GoogleGLAProvider(api_key=api_key))
+            
+            logger.info("🧠 Setting up PydanticAI agent with system prompt...")
+            self._agent = Agent(
+                model=self._model,
+                output_type=TOPIKBatchResult,
+                system_prompt="""
 Bạn là AI chuyên phân tích đề thi TOPIK. Nhiệm vụ: phân tích TOÀN BỘ dữ liệu OCR từ nhiều ảnh 
 và trích xuất TẤT CẢ câu hỏi thành format có cấu trúc.
 
@@ -53,7 +89,17 @@ Trả về structured data theo Pydantic schema với:
 - source_images: List[str]
 - processing_notes: str (ghi chú quá trình xử lý)
             """
-        )
+            )
+            logger.info("✅ PydanticAI agent initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize PydanticAI agent: {e}")
+            raise RuntimeError(f"PydanticAI initialization failed: {e}")
+    
+    @property
+    def agent(self):
+        """Thread-safe access to PydanticAI agent"""
+        return self._agent
     
     async def structure_batch_ocr(self, 
                                 all_ocr_data: List[tuple[str, List[OCRResult]]], 
@@ -66,7 +112,9 @@ Trả về structured data theo Pydantic schema với:
             source_info: Thông tin nguồn
         """
         try:
-            logger.info(f"🤖 Starting PydanticAI batch processing for {len(all_ocr_data)} images")
+            STRUCTURER_LOGGER.info(f"🤖 Starting PydanticAI batch processing for {len(all_ocr_data)} images")
+            import sys
+            sys.stdout.flush()  # Force flush for Docker
             
             # Chuẩn bị input context cho AI
             context_parts = []
@@ -97,10 +145,12 @@ Hãy phân tích TOÀN BỘ dữ liệu trên và trích xuất tất cả câu 
             """
             
             # Gọi PydanticAI agent
-            logger.info("🔥 Calling PydanticAI for structured extraction...")
+            STRUCTURER_LOGGER.info("🔥 Calling PydanticAI for structured extraction...")
+            sys.stdout.flush()  # Force flush for Docker
             result = await self.agent.run(full_context)
             
-            logger.info(f"✅ PydanticAI completed: {result.output.total_questions} questions from {len(all_ocr_data)} images")
+            STRUCTURER_LOGGER.info(f"✅ PydanticAI completed: {result.output.total_questions} questions from {len(all_ocr_data)} images")
+            sys.stdout.flush()  # Force flush for Docker
             
             # Add source images info
             result.output.source_images = source_images

@@ -8,11 +8,14 @@ from fastapi.responses import FileResponse
 
 from .schemas import APIResponse, ProcessingStatus
 from .services import TOPIKProcessingService, FileService
-from config import logger
+import logging
 
-# Initialize services
-processing_service = TOPIKProcessingService()
+logger = logging.getLogger(__name__)
+
+# Initialize services - defer processor initialization until startup
+processing_service = None
 file_service = FileService()
+_initialization_in_progress = False
 
 # Create router
 router = APIRouter()
@@ -26,7 +29,7 @@ async def root():
             message="TOPIK OCR API is running (PydanticAI Optimized)",
             data={
                 "version": "2.0.0-PydanticAI", 
-                "processor_ready": processing_service.is_ready(),
+                "processor_ready": processing_service.is_ready() if processing_service else False,
                 "features": [
                     "PydanticAI integration",
                     "Optimized batch processing", 
@@ -47,7 +50,7 @@ async def root():
 async def health_check():
     """Detailed health check with dependency status"""
     try:
-        processor_ready = processing_service.is_ready()
+        processor_ready = processing_service.is_ready() if processing_service else False
         gemini_available = bool(os.getenv("GEMINI_API_KEY"))
         
         # Check dependencies
@@ -55,7 +58,6 @@ async def health_check():
         
         # Check PaddleOCR
         try:
-            from paddleocr import PaddleOCR
             dependencies["paddleocr"] = "available"
         except ImportError as e:
             dependencies["paddleocr"] = f"import_error: {str(e)}"
@@ -121,7 +123,7 @@ async def manual_initialize():
                 status="success",
                 message="Processor initialized successfully",
                 data={
-                    "processor_ready": processing_service.is_ready(),
+                    "processor_ready": processing_service.is_ready() if processing_service else False,
                     "timestamp": datetime.now().isoformat()
                 }
             )
@@ -130,7 +132,7 @@ async def manual_initialize():
                 status="error",
                 message="Processor initialization failed",
                 data={
-                    "processor_ready": processing_service.is_ready(),
+                    "processor_ready": processing_service.is_ready() if processing_service else False,
                     "timestamp": datetime.now().isoformat()
                 }
             )
@@ -158,7 +160,7 @@ async def process_images(
         ProcessingStatus với link download CSV
     """
     try:
-        if not processing_service.is_ready():
+        if not processing_service or not processing_service.is_ready():
             raise HTTPException(status_code=500, detail="Processor not initialized")
         
         if not files:
@@ -187,7 +189,7 @@ async def process_zip_file(
         source_info: Thông tin nguồn đề thi
     """
     try:
-        if not processing_service.is_ready():
+        if not processing_service or not processing_service.is_ready():
             raise HTTPException(status_code=500, detail="Processor not initialized")
         
         result = await processing_service.process_zip_file(file, source_info)
@@ -245,6 +247,18 @@ async def cleanup_old_files():
 # Initialize processor on module load
 async def initialize_service():
     """Initialize the processing service with graceful error handling"""
+    global processing_service, _initialization_in_progress
+    
+    # Prevent concurrent initialization
+    if _initialization_in_progress:
+        logger.info("⏳ Initialization already in progress, waiting...")
+        return False
+        
+    if processing_service and processing_service.is_ready():
+        logger.info("✅ Service already initialized and ready - skipping")
+        return True
+    
+    _initialization_in_progress = True
     try:
         GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
         if not GEMINI_API_KEY:
@@ -253,26 +267,33 @@ async def initialize_service():
             logger.warning("🔄 API will start without processing capabilities")
             return False
         
-        logger.info("🚀 Initializing TOPIK processing service with PydanticAI...")
-        logger.info(f"GEMINI_API_KEY found: {GEMINI_API_KEY[:8]}...") # Log first 8 chars for verification
-        
-        success = await processing_service.initialize_processor(GEMINI_API_KEY)
-        
-        if not success:
-            logger.error("❌ Failed to initialize processing service")
-            logger.warning("🔄 API will start in degraded mode")
-            return False
+        # Only initialize once
+        if processing_service is None:
+            logger.info("🚀 Initializing TOPIK processing service with PydanticAI...")
+            processing_service = TOPIKProcessingService()
             
-        # Verify the processor is actually ready
-        is_ready = processing_service.is_ready()
-        logger.info(f"🔍 Processor ready status: {is_ready}")
-        
-        if is_ready:
-            logger.info("✅ TOPIK processing service initialized successfully")
-            return True
+        # Initialize processor if not already done
+        if not processing_service.is_ready():
+            success = await processing_service.initialize_processor(GEMINI_API_KEY)
+            
+            if not success:
+                logger.error("❌ Failed to initialize processing service")
+                logger.warning("🔄 API will start in degraded mode")
+                return False
+                
+            # Verify the processor is actually ready
+            is_ready = processing_service.is_ready()
+            logger.info(f"🔍 Processor ready status: {is_ready}")
+            
+            if is_ready:
+                logger.info("✅ TOPIK processing service initialized successfully")
+                return True
+            else:
+                logger.error("❌ Processor initialization appeared successful but is_ready() returned False")
+                return False
         else:
-            logger.error("❌ Processor initialization appeared successful but is_ready() returned False")
-            return False
+            logger.info("✅ Processing service already initialized - skipping")
+            return True
         
     except Exception as e:
         logger.error(f"❌ Service initialization failed with exception: {e}")
@@ -282,6 +303,8 @@ async def initialize_service():
         logger.warning("🔄 API will start in degraded mode - check dependencies")
         # Don't raise, allow API to start for debugging
         return False
+    finally:
+        _initialization_in_progress = False
 
 async def cleanup_service():
     """Cleanup service resources"""

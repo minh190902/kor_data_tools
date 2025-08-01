@@ -5,7 +5,7 @@ wheel>=0.41.0
 ## Core OCR and AI (Essential)
 paddlepaddle>=3.1.0
 paddleocr>=3.1.0
-pydantic-ai>=0.0.14
+pydantic-ai-slim>=0.4.10
 
 ## Image processing (Essential)
 opencv-python-headless>=4.8.0  # headless version - smaller, no GUI

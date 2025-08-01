@@ -23,9 +23,11 @@ Features:
 
 import asyncio
 import os
+import sys
 from dotenv import load_dotenv
 
 from processors.topik_processor import TOPIKDataProcessor
+from config import logger, log_and_flush
 
 # Load environment variables
 load_dotenv()
@@ -37,11 +39,12 @@ async def main():
     # Configuration - Get API key from environment
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
     if not GEMINI_API_KEY:
-        print("❌ GEMINI_API_KEY không được tìm thấy!")
+        log_and_flush(logger, "error", "❌ GEMINI_API_KEY không được tìm thấy!")
         print("Vui lòng:")
         print("1. Tạo file .env trong thư mục gốc")
         print("2. Thêm dòng: GEMINI_API_KEY=your_actual_api_key")
         print("3. Hoặc set environment variable GEMINI_API_KEY")
+        sys.stdout.flush()
         return
     
     # Database config - chọn một trong hai
@@ -62,9 +65,10 @@ async def main():
     }
     
     # 🚀 Initialize optimized processor with PydanticAI only
-    print(f"🚀 Khởi tạo Optimized TOPIK Data Processor...")
-    print(f"🔥 Features: PydanticAI + Cross-Image Processing + Tối ưu hóa hoàn toàn")
+    log_and_flush(logger, "info", "🚀 Initializing TOPIK processing service with PydanticAI...")
+    log_and_flush(logger, "info", f"GEMINI_API_KEY found: {GEMINI_API_KEY[:10]}...")
     
+    log_and_flush(logger, "info", "🔧 Creating TOPIKDataProcessor instance...")
     processor = TOPIKDataProcessor(
         gemini_api_key=GEMINI_API_KEY,
         db_config=None,
@@ -75,23 +79,24 @@ async def main():
     # Process directory with optimized workflow
     source_info = "TOPIK I Reading Practice - PydanticAI Optimized"
     
-    print(f"📁 Bắt đầu xử lý với PydanticAI Workflow...")
-    print(f"📊 Mode: PydanticAI Batch Processing (Legacy đã loại bỏ)")
+    log_and_flush(logger, "info", "📁 Starting directory processing with PydanticAI Workflow...")
+    log_and_flush(logger, "info", "📊 Mode: PydanticAI Batch Processing (Legacy removed)")
     
     success = await processor.process_directory(
         source_info=source_info
     )
     
     if success:
-        print("✅ PydanticAI processing hoàn tất!")
+        log_and_flush(logger, "info", "✅ PydanticAI processing completed successfully!")
         print("🎯 Ưu điểm của PydanticAI workflow:")
         print("   • Chỉ 1 API call thay vì N calls → Tiết kiệm cost")
         print("   • Xử lý cross-image questions → Không bỏ sót thông tin")
         print("   • Pydantic validation → Đảm bảo output quality")
         print("   • Clean code → Loại bỏ hoàn toàn legacy Gemini")
         print("   • Better performance → Tối ưu hóa và gọn gàng")
+        sys.stdout.flush()
     else:
-        print("❌ Có lỗi trong quá trình xử lý!")
+        log_and_flush(logger, "error", "❌ Processing failed with errors!")
 
 
 async def demo_pydantic_ai():

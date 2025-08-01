@@ -41,7 +41,7 @@ class DownloadableAPIClient:
                 loop.close()
         
         future = self._executor.submit(run_in_new_loop)
-        return future.result(timeout=30)
+        return future.result(timeout=100)
     
     async def _check_health_async(self) -> Tuple[bool, str]:
         """Async health check"""

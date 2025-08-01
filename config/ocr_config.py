@@ -21,11 +21,11 @@ class OCRConfig:
         configs = [
             # Config 1: Full Korean OCR with textline orientation
             {
-                'use_textline_orientation': True,
+                'use_textline_orientation': False,
                 'lang': 'korean',
-                'text_det_limit_side_len': 960,
-                'text_det_limit_type': 'max',
-                'text_recognition_batch_size': 1,
+                'text_det_limit_side_len': 736,
+                'text_det_limit_type': 'min',
+                'text_recognition_batch_size': 4,
             },
             
             # Config 2: Korean OCR without textline orientation (faster)
