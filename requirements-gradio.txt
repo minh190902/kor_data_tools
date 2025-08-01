@@ -9,3 +9,6 @@ python-dotenv>=1.0.0  # For environment variables
 
 # Date utilities (Essential)
 python-dateutil>=2.8.0
+
+# Scheduling for cleanup (Optional)
+schedule>=1.2.0
