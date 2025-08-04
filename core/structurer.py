@@ -57,37 +57,36 @@ class TOPIKStructurer:
             self._agent = Agent(
                 model=self._model,
                 output_type=TOPIKBatchResult,
-                system_prompt="""
-Bạn là AI chuyên phân tích đề thi TOPIK. Nhiệm vụ: phân tích TOÀN BỘ dữ liệu OCR từ nhiều ảnh 
-và trích xuất TẤT CẢ câu hỏi thành format có cấu trúc.
+                instructions="""
+You are an AI specialist for analyzing TOPIK (Test of Proficiency in Korean) exam papers. 
+Your task: Analyze ALL OCR data from multiple images and extract ALL questions into structured format.
 
-🔥 QUAN TRỌNG - Xử lý Cross-Image Questions:
-- Nếu câu hỏi bị chia làm nhiều ảnh (VD: ảnh 1 có "34", ảnh 2 có nội dung), hãy GHÉP CHÚNG LẠI
-- Đặc biệt chú ý các trường hợp:
-  * Số câu hỏi ở ảnh này, nội dung ở ảnh khác  
-  * Đoạn văn dài chia nhiều ảnh
-  * Chỉ thị chung (※ [31-33]) áp dụng cho nhiều ảnh
+# CRITICAL - Handle Cross-Image Questions:
+- If questions are split across multiple images (e.g., image 1 has "34", image 2 has content), MERGE THEM
+- Pay special attention to these cases:
+  * Question number in one image, content in another
+  * Long passages split across multiple images  
+  * General instructions (※ [31-33]) applying to multiple images
 
-📋 Quy tắc xử lý:
-1. SẮP XẾP theo thứ tự câu hỏi (question_number)
-2. GHÉP thông tin từ nhiều ảnh cho cùng 1 câu hỏi
-3. Đảm bảo KHÔNG BỊ THIẾU câu hỏi nào
-4. Tạo question_id duy nhất cho mỗi câu (format: T{Level}{Skill}_{Test}_{Number})
-5. Điền đầy đủ thông tin có thể trích xuất được
-6. skill_area phải là một trong: "읽기", "듣기", "쓰기"
-7. question_number phải là số nguyên dương
-8. correct_answer nếu có phải là 1, 2, 3, hoặc 4
+# Processing Rules:
+1. SORT by question order (question_number)
+2. MERGE information from multiple images for the same question
+3. Ensure NO questions are missed
+4. Create unique question_id for each question (format: T{{Level}}{{Skill}}_{Test}_{Number}) (e.g., T1R_EX_31)
+    + level: (e.g., 1, 2)
+    + skill: "읽기" -> "R", "듣기" -> "L", "쓰기" -> "W"
+5. Fill in all extractable information completely
+6. skill_area must be one of: "읽기", "듣기", "쓰기" (in Korean)
+7. question_number must be a positive integer
+8. correct_answer if available must be 1, 2, 3, or 4
 
-💡 Lưu ý đặc biệt:
-- Nếu thấy pattern như "34)", "35)" trong ảnh A và nội dung câu hỏi trong ảnh B → ghép lại
-- Chỉ thị chung như "※ [31-33] 다음 글을 읽고 물음에 답하시오" áp dụng cho tất cả câu trong range
-- Đoạn văn dài có thể span nhiều ảnh → ghép đầy đủ nội dung
+# Special Notes:
+- If you see patterns like "34)", "35)" in image A and question content in image B → merge them
+- General instructions like "※ [31-33] 다음 글을 읽고 물음에 답하시오" apply to all questions in that range
+- Long passages may span multiple images → merge complete content
 
-Trả về structured data theo Pydantic schema với:
-- questions: List[TOPIKQuestionPydantic] 
-- total_questions: int
-- source_images: List[str]
-- processing_notes: str (ghi chú quá trình xử lý)
+IMPORTANT: All Korean text content (questions, options, passages) must be preserved in Korean.
+Only structural elements and metadata can be in English.
             """
             )
             logger.info("✅ PydanticAI agent initialized successfully")
@@ -101,11 +100,41 @@ Trả về structured data theo Pydantic schema với:
         """Thread-safe access to PydanticAI agent"""
         return self._agent
     
+    def _filter_ocr_text(self, ocr_results: List[OCRResult], min_confidence: float = 0.7) -> str:
+        """Filter OCR results by confidence and remove noise"""
+        filtered_texts = []
+        for result in ocr_results:
+            text = result.text.strip()
+            # Skip very short noise text or low confidence
+            if result.confidence < min_confidence:
+                continue
+
+            filtered_texts.append(text)
+        
+        return "\n".join(filtered_texts)
+    
+    def _create_compact_context(self, all_ocr_data: List[tuple[str, List[OCRResult]]]) -> tuple[str, List[str]]:
+        """Create compact context for AI processing"""
+        context_parts = []
+        source_images = []
+        
+        for i, (image_path, ocr_results) in enumerate(all_ocr_data):
+            image_name = Path(image_path).name
+            source_images.append(image_name)
+            
+            # Filter and compact OCR text
+            filtered_text = self._filter_ocr_text(ocr_results)
+            
+            if filtered_text:  # Only add if we have meaningful content
+                context_parts.append(f"IMG{i+1}:\n{filtered_text}")
+        
+        return "\n\n".join(context_parts), source_images
+    
     async def structure_batch_ocr(self, 
                                 all_ocr_data: List[tuple[str, List[OCRResult]]], 
                                 source_info: str = "TOPIK") -> TOPIKBatchResult:
         """
-        🚀 Structure toàn bộ OCR data từ nhiều ảnh với PydanticAI
+        🚀 Structure toàn bộ OCR data từ nhiều ảnh với PydanticAI (Token optimized)
         
         Args:
             all_ocr_data: List of (image_path, ocr_results) tuples
@@ -116,38 +145,30 @@ Trả về structured data theo Pydantic schema với:
             import sys
             sys.stdout.flush()  # Force flush for Docker
             
-            # Chuẩn bị input context cho AI
-            context_parts = []
-            source_images = []
+            # Create compact context
+            compact_context, source_images = self._create_compact_context(all_ocr_data)
             
-            for i, (image_path, ocr_results) in enumerate(all_ocr_data):
-                image_name = Path(image_path).name
-                source_images.append(image_name)
-                
-                # Format OCR với confidence scores
-                ocr_text = "\n".join([f"[Conf:{result.confidence:.2f}] {result.text}" 
-                                    for result in ocr_results if result.text.strip()])
-                
-                context_parts.append(f"""
-=== ẢNH {i+1}: {image_name} ===
-{ocr_text}
-""")
+            # Check if we have meaningful content
+            if not compact_context.strip():
+                STRUCTURER_LOGGER.warning("⚠️ No meaningful OCR content found")
+                return TOPIKBatchResult(
+                    questions=[],
+                    total_questions=0,
+                    source_images=source_images,
+                    processing_notes="No meaningful OCR content extracted"
+                )
             
-            # Tạo prompt với toàn bộ context
-            full_context = f"""
-Nguồn đề thi: {source_info}
-Tổng số ảnh cần xử lý: {len(all_ocr_data)}
-
-{''.join(context_parts)}
-
-Hãy phân tích TOÀN BỘ dữ liệu trên và trích xuất tất cả câu hỏi.
-Đặc biệt chú ý ghép nối thông tin từ nhiều ảnh cho cùng 1 câu hỏi.
-            """
+            # Compact prompt
+            prompt = f"{source_info} exam ({len(all_ocr_data)} images):\n\n{compact_context}"
+            
+            # Log token estimation (rough)
+            token_estimate = len(prompt.split())
+            STRUCTURER_LOGGER.info(f"📊 Token estimate: ~{token_estimate} words")
             
             # Gọi PydanticAI agent
             STRUCTURER_LOGGER.info("🔥 Calling PydanticAI for structured extraction...")
             sys.stdout.flush()  # Force flush for Docker
-            result = await self.agent.run(full_context)
+            result = await self.agent.run(prompt)
             
             STRUCTURER_LOGGER.info(f"✅ PydanticAI completed: {result.output.total_questions} questions from {len(all_ocr_data)} images")
             sys.stdout.flush()  # Force flush for Docker

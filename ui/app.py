@@ -1,278 +1,284 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Alternative Gradio app with File download component
-"""
-
-import asyncio
-import aiohttp
 import gradio as gr
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
-import json
 import os
-import threading
-import concurrent.futures
+import requests
 from datetime import datetime
 import tempfile
-import requests
+import sys
+
+# Add parent directory to path for imports
+sys.path.append(str(Path(__file__).parent.parent))
+from utils.file_manager import file_manager
 
 # Configuration
 API_BASE_URL = os.getenv("API_BASE_URL", "http://ai-data-processing:8888")
 GRADIO_PORT = int(os.getenv("GRADIO_PORT", "7866"))
 GRADIO_HOST = os.getenv("GRADIO_HOST", "0.0.0.0")
 
-class DownloadableAPIClient:
-    """API client that downloads files to local temp directory"""
+class SimpleAPIClient:
+    """Simplified API client with basic functionality"""
     
     def __init__(self, api_base_url: str = API_BASE_URL):
         self.api_base_url = api_base_url
-        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         self.temp_dir = Path(tempfile.gettempdir()) / "topik_downloads"
         self.temp_dir.mkdir(exist_ok=True)
     
-    def _run_async_safe(self, coro):
-        """Run async function in a thread-safe way"""
-        def run_in_new_loop():
-            loop = asyncio.new_event_loop()
-            try:
-                return loop.run_until_complete(coro)
-            finally:
-                loop.close()
-        
-        future = self._executor.submit(run_in_new_loop)
-        return future.result(timeout=100)
-    
-    async def _check_health_async(self) -> Tuple[bool, str]:
-        """Async health check"""
-        try:
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(f"{self.api_base_url}/health") as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        if data.get("status") == "success":
-                            return True, "✅ API sẵn sàng"
-                        else:
-                            return False, f"❌ API không sẵn sàng: {data.get('message', 'Unknown error')}"
-                    else:
-                        return False, f"❌ API trả về status {response.status}"
-        except Exception as e:
-            return False, f"❌ Không thể kết nối API: {str(e)}"
-    
     def check_health(self) -> str:
-        """Thread-safe health check"""
+        """Check API health status"""
         try:
-            healthy, message = self._run_async_safe(self._check_health_async())
-            return message
+            response = requests.get(f"{self.api_base_url}/health", timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "success":
+                    return "🟢 API is running normally"
+                else:
+                    return f"🟡 API has issues: {data.get('message', 'Unknown error')}"
+            else:
+                return f"🔴 API error (code {response.status_code})"
+        except requests.exceptions.Timeout:
+            return "🔴 API timeout"
         except Exception as e:
-            return f"❌ Lỗi kiểm tra API: {str(e)}"
+            return f"🔴 Cannot connect: {str(e)}"
     
-    async def _process_images_async(self, files: List[str], source_info: str) -> Dict[str, Any]:
-        """Async image processing"""
+    def process_images(self, files: List[str], source_info: str) -> Tuple[Dict[str, Any], Optional[str]]:
+        """Process images with simplified error handling"""
         try:
-            timeout = aiohttp.ClientTimeout(total=300)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                data = aiohttp.FormData()
-                data.add_field('source_info', source_info)
+            files_data = []
+            for file_path in files:
+                if file_path and Path(file_path).exists():
+                    with open(file_path, 'rb') as f:
+                        files_data.append(('files', (Path(file_path).name, f.read(), 'image/jpeg')))
+            
+            data = {'source_info': source_info}
+            response = requests.post(f"{self.api_base_url}/process-images", 
+                                   files=files_data, data=data, timeout=300)
+            
+            result = response.json()
+            
+            if response.status_code == 200:
+                # Try to download the file
+                downloaded_file = None
+                if result.get("csv_filename"):
+                    downloaded_file = self.download_file(result["csv_filename"])
+                return {"success": True, "data": result}, downloaded_file
+            else:
+                return {"success": False, "error": result.get("detail", "Unknown error")}, None
                 
-                for file_path in files:
-                    if file_path and Path(file_path).exists():
-                        file_name = Path(file_path).name
-                        with open(file_path, 'rb') as f:
-                            data.add_field('files', f.read(), filename=file_name, content_type='image/jpeg')
-                
-                async with session.post(f"{self.api_base_url}/process-images", data=data) as response:
-                    result = await response.json()
-                    
-                    if response.status == 200:
-                        return {"success": True, "data": result}
-                    else:
-                        return {"success": False, "error": result.get("detail", "Unknown error")}
-                        
+        except requests.exceptions.Timeout:
+            return {"success": False, "error": "Processing timeout"}, None
         except Exception as e:
-            return {"success": False, "error": f"API request failed: {str(e)}"}
+            return {"success": False, "error": f"Processing error: {str(e)}"}, None
     
     def download_file(self, filename: str) -> Optional[str]:
-        """Download file from API to local temp directory"""
+        """Download file from API"""
         try:
-            download_url = f"{self.api_base_url}/download/{filename}"
-            response = requests.get(download_url, timeout=30)
-            
+            response = requests.get(f"{self.api_base_url}/download/{filename}", timeout=30)
             if response.status_code == 200:
                 local_file_path = self.temp_dir / filename
                 with open(local_file_path, 'wb') as f:
                     f.write(response.content)
-                
-                print(f"✅ Downloaded file to: {local_file_path}")
                 return str(local_file_path)
-            else:
-                print(f"❌ Download failed: {response.status_code}")
-                return None
-                
-        except Exception as e:
-            print(f"❌ Download error: {e}")
             return None
-    
-    def process_images(self, files: List[str], source_info: str) -> Tuple[Dict[str, Any], Optional[str]]:
-        """Process images and download result file"""
-        try:
-            result = self._run_async_safe(self._process_images_async(files, source_info))
-            
-            if result["success"] and result["data"].get("csv_filename"):
-                # Download the result file
-                downloaded_file = self.download_file(result["data"]["csv_filename"])
-                return result, downloaded_file
-            else:
-                return result, None
-                
-        except Exception as e:
-            return {"success": False, "error": f"Processing failed: {str(e)}"}, None
+        except Exception:
+            return None
 
 # Global API client
-api_client = DownloadableAPIClient()
+api_client = SimpleAPIClient()
 
-def safe_check_health() -> str:
-    """Safe health check"""
-    return api_client.check_health()
+def check_health() -> str:
+    """Simple health check with auto cleanup"""
+    health_status = api_client.check_health()
+    cleanup_msg = file_manager.auto_cleanup_if_needed()
+    return f"{health_status}\n\n📁 **Storage:** {cleanup_msg}"
 
-def safe_process_images(files: List[str], source_info: str, progress=gr.Progress()) -> Tuple[str, Optional[str]]:
-    """Safe image processing with file download"""
+def get_storage_info() -> str:
+    """Get basic storage information"""
+    try:
+        stats = file_manager.get_storage_stats()
+        return f"""
+📊 **Storage Status:**
+- Files: {stats['total_files']}
+- Size: {stats['total_size_mb']} MB
+- Recent files: {stats['age_distribution']['0-1_days']} today, {stats['age_distribution']['2-7_days']} this week
+"""
+    except Exception as e:
+        return f"❌ Error: {e}"
+
+def cleanup_files() -> str:
+    """Simple cleanup with basic feedback"""
+    try:
+        deleted_count, freed_mb = file_manager.cleanup_old_files(max_age_days=1, max_files=30)
+        if deleted_count > 0:
+            return f"🧹 Cleaned up {deleted_count} files, freed {freed_mb:.1f}MB"
+        else:
+            return "✅ No cleanup needed"
+    except Exception as e:
+        return f"❌ Cleanup error: {e}"
+
+def process_images(files: List[str], source_info: str, progress=gr.Progress()) -> Tuple[str, Optional[str], str]:
+    """Simplified image processing"""
     try:
         if not files:
-            return "❌ Vui lòng upload ít nhất một ảnh", None
+            return "❌ Please upload images", None, get_storage_info()
         
         valid_files = [f for f in files if f and Path(f).exists()]
         if not valid_files:
-            return "❌ Không tìm thấy file hợp lệ", None
+            return "❌ No valid files found", None, get_storage_info()
         
-        progress(0.1, desc="Đang kết nối API...")
-        progress(0.3, desc="Đang xử lý ảnh...")
+        progress(0.2, desc="🔍 Checking API...")
+        
+        # Check API health
+        health = api_client.check_health()
+        if "🔴" in health:
+            return f"❌ API not ready:\n{health}", None, get_storage_info()
+        
+        progress(0.5, desc="📤 Processing images...")
         
         result, downloaded_file = api_client.process_images(valid_files, source_info)
         
         if result["success"]:
             data = result["data"]
-            progress(0.8, desc="Đang tải file...")
+            progress(1.0, desc="✅ Complete!")
             
             success_msg = f"""
-✅ **Xử lý thành công!**
-
-📊 **Thống kê:**
-- Ảnh đã xử lý: {data.get('processed_images', 0)}
-- Câu hỏi tìm thấy: {data.get('extracted_questions', 0)}
-- File CSV: {data.get('csv_filename', 'N/A')}
-
-💾 File CSV đã được tải xuống và sẵn sàng.
-            """
-            
-            progress(1.0, desc="Hoàn thành!")
-            return success_msg, downloaded_file
+✅ **Success!**
+- Images: {data.get('processed_images', 0)}
+- Questions: {data.get('extracted_questions', 0)}
+- Time: {datetime.now().strftime('%H:%M:%S')}
+"""
+            return success_msg, downloaded_file, get_storage_info()
         else:
-            error_msg = f"❌ Xử lý thất bại: {result.get('error', 'Unknown error')}"
-            return error_msg, None
+            return f"❌ **Failed:** {result.get('error', 'Unknown error')}", None, get_storage_info()
             
     except Exception as e:
-        return f"❌ Lỗi: {str(e)}", None
+        return f"❌ **Error:** {str(e)}", None, get_storage_info()
 
 def create_demo():
-    """Create the Gradio demo interface with file download"""
+    """Create simplified Gradio interface"""
     
+    # Minimal CSS
     css = """
     .gradio-container {
-        max-width: 1200px !important;
+        max-width: 1000px !important;
         margin: auto !important;
     }
+    
     .main-header {
         text-align: center;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
         color: white;
-        padding: 2rem;
-        border-radius: 10px;
-        margin-bottom: 2rem;
+        padding: 1.5rem;
+        border-radius: 12px;
+        margin-bottom: 1rem;
+    }
+    
+    .main-header h1 {
+        font-size: 2rem;
+        margin-bottom: 0.5rem;
+    }
+    
+    .card {
+        background: white;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+    }
+    """
+    
+    js_func = """
+    function refresh() {
+        const url = new URL(window.location);
+        if (url.searchParams.get('__theme') !== 'light') {
+            url.searchParams.set('__theme', 'light');
+            window.location.href = url.href;
+        }
     }
     """
     
     with gr.Blocks(
         title="TOPIK OCR Tool",
-        theme=gr.themes.Soft(),
-        css=css
+        theme=gr.themes.Soft(primary_hue="blue"),
+        css=css,
+        js=js_func
     ) as demo:
         
         # Header
-        with gr.Row():
-            gr.Markdown("""
-            <div class="main-header">
-                <h1>🇰🇷 TOPIK OCR Tool</h1>
-                <p>Công cụ chuyên nghiệp để xử lý ảnh đề thi TOPIK thành dữ liệu CSV có cấu trúc</p>
-            </div>
-            """)
+        gr.Markdown("""
+        <div class="main-header">
+            <h1>🇰🇷 TOPIK OCR Tool</h1>
+            <p>Convert TOPIK exam images to structured data</p>
+        </div>
+        """)
         
-        # API Status
-        with gr.Row():
-            with gr.Column():
-                status_btn = gr.Button("🔍 Kiểm tra trạng thái API", variant="secondary")
-                status_output = gr.Markdown("Nhấn nút để kiểm tra...")
-        
-        # Main Processing Section
-        with gr.Row():
-            with gr.Column(scale=2):
-                gr.Markdown("### 📤 Upload ảnh đề thi")
+        # Main Processing
+        with gr.Column():
+            with gr.Group(elem_classes=["card"]):
+                gr.Markdown("### 📤 Process Images")
                 
                 image_files = gr.File(
-                    label="Chọn ảnh đề thi TOPIK",
+                    label="Upload exam images",
                     file_count="multiple",
-                    file_types=["image"],
-                    height=200
+                    file_types=["image"]
                 )
                 
-                source_info = gr.Textbox(
-                    label="Thông tin nguồn đề thi",
-                    value="TOPIK Practice Test",
-                    placeholder="Ví dụ: TOPIK I 읽기 - 70회"
-                )
-                
-                process_btn = gr.Button(
-                    "🚀 Xử lý ảnh", 
-                    variant="primary",
-                    size="lg"
-                )
-            
-            with gr.Column(scale=2):
-                gr.Markdown("### 📊 Kết quả xử lý")
-                result_output = gr.Markdown("Chờ xử lý...")
-                
-                gr.Markdown("### 📥 Tải xuống kết quả")
-                download_file = gr.File(
-                    label="File CSV kết quả",
-                    visible=True,
-                    interactive=False
-                )
+                with gr.Row():
+                    source_info = gr.Textbox(
+                        label="Exam info",
+                        value="TOPIK Practice Test",
+                        placeholder="Example: TOPIK I 읽기 - 70회"
+                    )
+                    
+                    process_btn = gr.Button("🚀 Process", variant="primary")
+        
+        # Results
+        with gr.Column():
+            with gr.Group(elem_classes=["card"]):
+                gr.Markdown("### 📊 Results")
+                result_output = gr.Markdown("Ready to process...")
+                download_file = gr.File(label="📥 Download CSV", visible=True)
+        
+        # System Status
+        with gr.Column():
+            with gr.Group(elem_classes=["card"]):
+                gr.Markdown("### ⚙️ System")
+                with gr.Row():
+                    status_btn = gr.Button("🔍 API Status")
+                    storage_btn = gr.Button("📁 Storage") 
+                    cleanup_btn = gr.Button("🧹 Cleanup")
+                system_output = gr.Markdown("Click buttons above for info...")
         
         # Event handlers
         status_btn.click(
-            fn=safe_check_health,
-            outputs=status_output
+            fn=check_health,
+            outputs=system_output
+        )
+        
+        storage_btn.click(
+            fn=get_storage_info,
+            outputs=system_output
+        )
+        
+        cleanup_btn.click(
+            fn=cleanup_files,
+            outputs=system_output
         )
         
         process_btn.click(
-            fn=safe_process_images,
+            fn=process_images,
             inputs=[image_files, source_info],
-            outputs=[result_output, download_file],
+            outputs=[result_output, download_file, system_output],
             show_progress=True
         )
         
-        # Footer
+        # Simple Footer
         gr.Markdown("""
-        ---
-        💡 **Hướng dẫn sử dụng:**
-        1. Kiểm tra trạng thái API trước khi xử lý
-        2. Upload một hoặc nhiều ảnh đề thi TOPIK (JPG, PNG, etc.)
-        3. Nhập thông tin nguồn đề thi (tùy chọn)
-        4. Nhấn "Xử lý ảnh" và đợi kết quả
-        5. File CSV sẽ xuất hiện trong phần "Tải xuống kết quả"
-        
-        🔧 **Hỗ trợ:** Tool này sử dụng PaddleOCR + Google Gemini để trích xuất và cấu trúc hóa dữ liệu đề thi.
+        <div style="text-align: center; padding: 1rem; margin-top: 1rem; border-top: 1px solid #e5e7eb;">
+            <p style="margin: 0; color: #6b7280;">
+                🔧 PaddleOCR + Gemini AI • 🧹 Auto cleanup • 💾 Max 50 files
+            </p>
+        </div>
         """)
     
     return demo
@@ -281,17 +287,15 @@ def create_demo():
 demo = create_demo()
 
 def main():
-    """Main function to launch the app"""
-    print(f"🚀 Starting TOPIK Gradio App (File Download Version)...")
-    print(f"📡 API Base URL: {API_BASE_URL}")
-    print(f"🌐 Gradio Host: {GRADIO_HOST}:{GRADIO_PORT}")
+    """Launch the simplified app"""
+    print(f"🚀 Starting TOPIK Gradio App...")
+    print(f"📡 API: {API_BASE_URL}")
+    print(f"🌐 Server: {GRADIO_HOST}:{GRADIO_PORT}")
     
     demo.launch(
         server_name=GRADIO_HOST,
         server_port=GRADIO_PORT,
-        share=False,
-        show_error=True,
-        quiet=False
+        share=False
     )
 
 if __name__ == "__main__":

@@ -50,25 +50,25 @@ class SkillArea(str, Enum):
 
 class TOPIKQuestionPydantic(BaseModel):
     """Enhanced Pydantic model cho câu hỏi TOPIK với validation"""
-    question_id: str = Field(..., description="ID duy nhất format T{Level}{Skill}_{Test}_{Number}")
-    source: str = Field(..., description="Nguồn đề thi")
-    question_number: int = Field(..., description="Số thứ tự câu hỏi", ge=1)
-    skill_area: SkillArea = Field(..., description="Kỹ năng đánh giá")
-    question_type: str = Field(..., description="Loại câu hỏi")
-    passage: str = Field("", description="Đoạn văn/nội dung")
-    passage_summary: str = Field("", description="Tóm tắt đoạn văn")
-    question_prompt: str = Field(..., description="Câu hỏi chính")
-    option_1: str = Field("", description="Lựa chọn 1")
-    option_2: str = Field("", description="Lựa chọn 2")
-    option_3: str = Field("", description="Lựa chọn 3")
-    option_4: str = Field("", description="Lựa chọn 4")
-    correct_answer: Optional[int] = Field(None, description="Đáp án đúng 1-4", ge=1, le=4)
-    explanation: str = Field("", description="Giải thích")
-    keywords: str = Field("", description="Từ khóa")
-    difficulty: str = Field("", description="Độ khó")
-    audio_file: str = Field("", description="File âm thanh")
-    image: str = Field("", description="File hình ảnh")
-    
+    question_id: str = Field(..., description="Unique ID T{Level}{Skill}_{Test}_{Number}")
+    source: str = Field(..., description="Source of the question")
+    question_number: int = Field(..., description="Question number", ge=1)
+    skill_area: SkillArea = Field(..., description="Skill area")
+    question_type: str = Field(..., description="Question type")
+    passage: str = Field("", description="Passage/content")
+    passage_summary: str = Field("", description="Passage summary")
+    question_prompt: str = Field(..., description="Main question")
+    option_1: str = Field("", description="Option 1")
+    option_2: str = Field("", description="Option 2")
+    option_3: str = Field("", description="Option 3")
+    option_4: str = Field("", description="Option 4")
+    correct_answer: Optional[int] = Field(None, description="Correct answer 1-4", ge=1, le=4)
+    explanation: str = Field("", description="Explanation")
+    keywords: str = Field("", description="Keywords")
+    difficulty: str = Field("", description="Difficulty")
+    audio_file: str = Field("", description="Audio file")
+    image: str = Field("", description="Image file")
+
     def to_legacy_dict(self) -> dict:
         """Convert to legacy TOPIKQuestion dict format"""
         return {
@@ -95,7 +95,7 @@ class TOPIKQuestionPydantic(BaseModel):
 
 class TOPIKBatchResult(BaseModel):
     """Kết quả xử lý batch nhiều ảnh với PydanticAI"""
-    questions: List[TOPIKQuestionPydantic] = Field(..., description="Danh sách các câu hỏi")
-    total_questions: int = Field(..., description="Tổng số câu hỏi")
-    source_images: List[str] = Field(..., description="Danh sách ảnh nguồn")
-    processing_notes: str = Field("", description="Ghi chú quá trình xử lý")
+    questions: List[TOPIKQuestionPydantic] = Field(..., description="list of TOPIK questions")
+    total_questions: int = Field(..., description="total number of questions")
+    source_images: List[str] = Field(..., description="list of source images")
+    processing_notes: str = Field("", description="processing notes in English")
